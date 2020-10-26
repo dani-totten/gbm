@@ -1,0 +1,179 @@
+---
+title: "finalproject"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(ggcorrplot)
+library(gbm)
+library(rpart)
+library(rpart.plot)
+options(scipen=9999)
+set.seed(123)
+```
+
+```{r}
+# load and clean data
+
+# load, make a copy
+raw_residential_data1 <- read.csv("~/Desktop/MS-Stat/MATH6388/Final Project/raw_residential_data.csv")
+raw_residential_data <- raw_residential_data1
+
+# get date into year/month/day format
+raw_residential_data$SALEDATE <- str_sub(as.character(raw_residential_data$SALEDATE), 1, 10)
+raw_residential_data$SALEDATE <- ymd(raw_residential_data$SALEDATE)
+
+# drop data without a price and not sold in last 5 years, a couple of weird ACs that are 0 when should be y/n, so drop those too
+raw_residential_data <- raw_residential_data %>% filter(PRICE != 0, SALEDATE>="2014-01-01") %>% droplevels()
+
+#housing data has some major outliers, remove most expensive 1$
+quantile(raw_residential_data$PRICE, c(.5, .75, .9, .95, .99))
+raw_residential_data <- raw_residential_data %>% filter(PRICE < 3177600)
+
+# restructure some variables to be binary
+raw_residential_data <- raw_residential_data %>% mutate(PRICE = replace_na(PRICE, 0), YR_RMDL=replace_na(YR_RMDL, 9999), RMDL_YN = ifelse(YR_RMDL<2018, 1, 0), STRUCT = (ifelse(STRUCT_D=="Single", 1, 0)), WOOD_FLR = (ifelse(INTWALL_D == "Hardwood" | INTWALL_D == "Wood Floor", 1, 0)))
+
+# Make AC numeric binary instead of factor
+raw_residential_data$AC <- ifelse(raw_residential_data$AC=="Y", 1, 0)
+
+summary(raw_residential_data)
+
+# There are just a lot of variables, remove some so that all data is in numeric or integer
+r1 <- raw_residential_data %>% dplyr::select(-OBJECTID, -SSL, -HEAT, -HEAT_D, -YR_RMDL, -QUALIFIED, -SALE_NUM, -GBA, -BLDG_NUM, -STYLE, -STYLE_D, -STRUCT, -STRUCT_D, -GRADE, -GRADE_D, -CNDTN_D, -EXTWALL, -EXTWALL_D, -ROOF, -ROOF_D, -INTWALL, -INTWALL_D, -USECODE, -GIS_LAST_MOD_DTTM, -EYB, -SALEDATE)
+
+# make some of the variables into integers
+r1 <- r1 %>% mutate(AC = as.integer(AC), STORIES = as.integer(STORIES), PRICE = as.integer(PRICE), RMDL_YN = as.integer(RMDL_YN), WOOD_FLR = as.integer(WOOD_FLR))
+
+# remove observations with na's, only 1
+r1 <- na.omit(r1)
+
+# drop other tables to save space
+```
+
+```{r}
+#Identify near zero-variance predictors - there are none
+nearZeroVar(r1, saveMetrics=TRUE)
+```
+
+```{r}
+rcorr <- round(cor(dplyr::select(r1, -PRICE)), 1)
+ggcorrplot(rcorr, type="lower", lab=TRUE)
+#pairs(r1)
+ggplot(r1, aes(x=PRICE)) + geom_density() + labs(x="Price of Residence", y="Density", title="Density of Residence Prices")
+```
+create test and train (can use createFolds or createResample if needed)
+```{r}
+trainIndex <- createDataPartition(r1$PRICE, p=.75, list=FALSE, times=1)
+rtrain <- r1[trainIndex,]
+rtest <- r1[-trainIndex,]
+summary(rtrain)
+summary(rtest)
+```
+
+Run a gradient boosted model
+partial dependence plot
+plot(gb.5, i="BATHRM")
+```{r}
+gb1 <- gbm(PRICE ~ ., 
+           data=rtrain, 
+           n.trees=5000, 
+           interaction.depth=1, 
+           shrinkage=1,
+           distribution="gaussian")
+summary(gb1)
+gb1sum <-summary(gb1)
+gb1sum <- rename(gb1sum, "l = 1" = "rel.inf")
+
+# test error is a function of number of trees
+gb1Pred <- predict(gb1, rtest, n.trees=seq(from=0, to = 5000, by=100))
+gb1.err <- with(rtest, apply((gb1Pred-PRICE)**2, 2, mean))
+
+gb1.err <- data.frame(gb1.err)
+gb1.err <- select(gb1.err, "error1" = gb1.err)
+```
+
+```{r}
+gb.1 <- gbm(PRICE ~ ., 
+           data=rtrain, 
+           n.trees=5000, 
+           interaction.depth=1, 
+           shrinkage=0.1,
+           distribution="gaussian")
+summary(gb.1)
+gb.1sum <-summary(gb.1)
+gb.1sum <- rename(gb.1sum, "l = .1" = "rel.inf")
+
+gb.1Pred <- predict(gb.1, rtest, n.trees=seq(from=0, to = 5000, by=100))
+gb.1.err <- with(rtest, apply((gb.1Pred-PRICE)**2, 2, mean))
+gb.1.err <- data.frame(gb.1.err)
+gb.1.err <- select(gb.1.err, "error.1" = gb.1.err)
+```
+
+```{r}
+gb.01 <- gbm(PRICE ~ ., 
+           data=rtrain, 
+           n.trees=5000, 
+           interaction.depth=1, 
+           shrinkage=0.01,
+           distribution="gaussian")
+summary(gb.01)
+gb.01sum <-summary(gb.01)
+gb.01sum <- rename(gb.01sum, "lambda = .01" = "rel.inf")
+
+gb.01Pred <- predict(gb.01, rtest, n.trees=seq(from=0, to = 5000, by=100))
+gb.01.err <- with(rtest, apply((gb.01Pred-PRICE)**2, 2, mean))
+gb.01.err
+gb.01.err <- data.frame(gb.01.err)
+gb.01.err <- select(gb.01.err, "error.01" = gb.01.err)
+```
+
+```{r}
+gb.err <- cbind(gb1.err, gb.1.err, gb.01.err)
+
+gb.err <- rowid_to_column(gb.err, var = "t1")
+gb.err <- mutate(gb.err, num_trees = (t1 - 1)*100)
+
+ggplot(gb.err, aes(num_trees)) +
+  geom_line(aes(y= error1, colour = "error1")) +
+  geom_line(aes(y= error.1, colour = "error.1")) +
+  geom_line(aes(y= error.01, colour = "error.01"))  +
+  labs(x="Number of Trees Grown", y="Mean Squared Error in Test", title="MSE Reduction by Learning Rate", colour="Learning
+       Rate") +
+  ylim(70000000000, 230000000000)
+
+ggplot(gb.err, aes(num_trees)) +
+  geom_line(aes(y= error1, colour = "error1")) +
+  geom_line(aes(y= error.1, colour = "error.1")) +
+  geom_line(aes(y= error.01, colour = "error.01"))  +
+  labs(x="Number of Trees Grown", y="Mean Squared Error in Test", title="MSE Reduction by Learning Rate", colour="Learning
+       Rate") +
+  ylim(75000000000, 85000000000) + 
+  xlim(2000, 5000)
+
+gb.varsum <- data.frame(cbind(gb1sum, gb.1sum, gb.01sum))
+gb.varsum <- dplyr::select(gb.varsum, -var, -var.1, -var.2)
+gb.varsum
+```
+
+Create a simple decision tree plot
+```{r}
+set.seed(321)
+rtrain_sample <- sample_n(rtrain, 1000)
+simple.tree <- rpart(PRICE ~ LANDAREA + BEDRM, data=rtrain_sample, method="anova", control=rpart.control(minsplit=20))
+summary(simple.tree)
+plot(simple.tree, uniform=TRUE)
+text(simple.tree, use.n=TRUE, all=TRUE, cex=.8)
+prp(simple.tree, type=2, extra=101, nn=TRUE, fallen.leaves=TRUE,
+faclen=0, varlen=0, shadow.col="grey", branch.lty=3)
+```
+
+
+prp(model, type=2, extra=101, nn=TRUE, fallen.leaves=TRUE,
+faclen=0, varlen=0, shadow.col="grey", branch.lty=3)
